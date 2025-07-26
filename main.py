@@ -126,6 +126,29 @@ def update_price_data(symbols, max_points=200):
             if symbol in price_data:
                 price_data[symbol].append(data)
 
+def get_estimated_points(period, interval):
+    """Estimate number of data points for period/interval combination"""
+    period_days = {
+        '1d': 1, '5d': 5, '1mo': 30, '3mo': 90, 
+        '6mo': 180, '1y': 365, '2y': 730, '5y': 1825, 
+        '10y': 3650, 'max': 7300  # Rough estimate for max
+    }
+    
+    interval_per_day = {
+        '1m': 390, '5m': 78, '15m': 26, '30m': 13, 
+        '1h': 6.5, '1d': 1, '1wk': 0.14, '1mo': 0.03
+    }
+    
+    days = period_days.get(period, 365)
+    points_per_day = interval_per_day.get(interval, 1)
+    
+    estimated = int(days * points_per_day)
+    
+    if estimated > 1000:
+        return f"~{estimated//1000}k"
+    else:
+        return f"~{estimated}"
+
 def get_dataframe():
     """Convert stored data to DataFrame"""
     with data_lock:
@@ -157,11 +180,13 @@ st.set_page_config(
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now()
     st.session_state.symbols = ['AAPL', 'SPY', 'MSFT', 'TSLA']
-    st.session_state.refresh_interval = 10  # seconds
-    st.session_state.auto_refresh = False
-    st.session_state.historical_period = '5d'
-    st.session_state.historical_interval = '15m'
+    st.session_state.refresh_interval = 5  # Increased frequency to 5 seconds
+    st.session_state.auto_refresh = True  # Enable auto-refresh by default
+    st.session_state.historical_period = '5d'  # Back to 5 days for high frequency
+    st.session_state.historical_interval = '1m'  # 1-minute intervals for maximum detail
     st.session_state.initialized_symbols = set()
+    st.session_state.last_historical_period = '5d'
+    st.session_state.last_historical_interval = '1m'
 
 # Title
 st.title("📈 StreamDash - Financial Data")
@@ -182,26 +207,52 @@ if new_symbols != st.session_state.symbols:
     st.session_state.symbols = new_symbols
     # Reset initialized symbols to force re-fetch of historical data
     st.session_state.initialized_symbols = set()
+    if new_symbols:  # Only show message if symbols exist
+        st.sidebar.info("📥 New symbols detected. Click 'Refresh Now' to load historical data.")
 
 # Historical data settings
 st.sidebar.subheader("Historical Data")
 historical_period = st.sidebar.selectbox(
     "Historical period:",
-    options=['1d', '5d', '1mo', '3mo'],
-    index=['1d', '5d', '1mo', '3mo'].index(st.session_state.historical_period)
+    options=['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'max'],
+    index=['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'max'].index(st.session_state.historical_period)
 )
 st.session_state.historical_period = historical_period
 
+# Smart interval suggestions based on period
+if historical_period in ['1d', '5d']:
+    interval_options = ['1m', '5m', '15m', '30m', '1h']
+    default_interval = '15m'
+elif historical_period in ['1mo', '3mo']:
+    interval_options = ['15m', '30m', '1h', '1d']
+    default_interval = '1h'
+else:  # 6mo and longer
+    interval_options = ['1h', '1d', '1wk', '1mo']
+    default_interval = '1d'
+
+# Ensure current interval is valid for the period
+if st.session_state.historical_interval not in interval_options:
+    st.session_state.historical_interval = default_interval
+
 historical_interval = st.sidebar.selectbox(
     "Historical interval:",
-    options=['1m', '5m', '15m', '1h'],
-    index=['1m', '5m', '15m', '1h'].index(st.session_state.historical_interval)
+    options=interval_options,
+    index=interval_options.index(st.session_state.historical_interval)
 )
 st.session_state.historical_interval = historical_interval
 
+# Show data estimate
+st.sidebar.caption(f"Estimated data points: {get_estimated_points(historical_period, historical_interval)}")
+
+# Add note about refreshing for new settings
+if historical_period != st.session_state.get('last_historical_period') or historical_interval != st.session_state.get('last_historical_interval'):
+    st.sidebar.info("⚙️ Historical settings changed. Refresh to apply to new symbols.")
+    st.session_state.last_historical_period = historical_period
+    st.session_state.last_historical_interval = historical_interval
+
 # Refresh controls
 st.sidebar.subheader("Data Refresh")
-refresh_interval = st.sidebar.slider("Refresh interval (seconds):", 5, 60, st.session_state.refresh_interval)
+refresh_interval = st.sidebar.slider("Refresh interval (seconds):", 1, 30, st.session_state.refresh_interval)
 st.session_state.refresh_interval = refresh_interval
 
 auto_refresh = st.sidebar.checkbox("Auto-refresh", value=st.session_state.auto_refresh)
@@ -343,7 +394,10 @@ with tab2:
 # Status
 st.sidebar.markdown("---")
 if auto_refresh:
+    next_refresh = refresh_interval - (datetime.now() - st.session_state.last_update).total_seconds()
     st.sidebar.success(f"🔄 Auto-refresh: ON ({refresh_interval}s)")
+    if next_refresh > 0:
+        st.sidebar.caption(f"Next refresh in: {next_refresh:.1f}s")
 else:
     st.sidebar.info("🔄 Auto-refresh: OFF")
 
@@ -356,6 +410,10 @@ if not df.empty:
     st.sidebar.info(f"📈 Historical: {historical_points}")
     st.sidebar.success(f"🔴 Live: {live_points}")
     st.sidebar.info(f"🕐 Last update: {st.session_state.last_update.strftime('%H:%M:%S')}")
+    
+    # Show refresh rate
+    if live_points > 1:
+        st.sidebar.caption(f"⚡ Effective refresh: {refresh_interval}s")
     
     # Show symbols status
     st.sidebar.subheader("Symbols Status")
@@ -373,6 +431,6 @@ st.sidebar.caption("StreamDash MVP v0.1")
 
 # Auto-refresh placeholder (triggers rerun)
 if st.session_state.auto_refresh:
-    time.sleep(1)  # Small delay to prevent excessive CPU usage
+    time.sleep(0.5)  # Reduced delay for more responsive updates
     placeholder = st.empty()
     placeholder.empty()
